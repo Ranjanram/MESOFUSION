@@ -1,0 +1,270 @@
+//*************This Plugin MesoFusion was developed by Ranjan Ramachandra at NCMIR, UC San Diego, Feb 2020. MesoFusion Stands for Mesoscale Fusion.
+//********Although, initially intended to align SEM image with correspoding MIMS image; It can be used to align Images between various Microscopy techniques like Optical, electron microscope and Secondary Ion Mass spectroscopy.
+
+//*********This Program was developed by Ranjan Ramachandra at NCMIR, UC San Diego, Feb 2020. 
+//**********This program converts the aligned and Warp adjusted MIMS image into different regions of isotope density
+//******* i.e. creates multiple images of different user requested categories based on the natural ratios.
+//*********************Version 1.2
+
+//********************Version Log	
+//**********Version 1.0 : Full functionality.
+//*********Version 1.1  : Named the Plugin MesoFusion. Made changes so that the program does not save in the same folder, but creates a new folder everytime. Made the categorize ratio maps use pixel intensity 
+//**********              instead of natural ratio. The Final color overlay reads the threshold values directly from the filename and need not be manually entered.
+//**********Version 1.2 : Fixed the problem wih flipping the image. Also for rectanular image for some particular cases the Rescale and Resize was not working appropriately, fixed it.
+//**********Version 1.3 : Fixed the problem with flipping the image.
+//***********Version 1.4 : Made more colors available to the User, to facilitate people with color vision deficiency.
+//***********Version 1.5 : Added the functionality to do large Scale Mosaic.
+//***********Version 1.6 : Debugged some bugs.
+
+import ij.*;
+import ij.process.*;
+import ij.gui.*;
+import java.awt.*;
+import ij.plugin.*;
+import ij.plugin.frame.*;
+import ij.io.*;
+import java.io.*;
+import java.util.*;
+import ij.macro.*;
+import ij.plugin.PlugIn; 
+import ij.plugin.frame.ThresholdAdjuster;
+import ij.plugin.filter.PlugInFilter;
+import ij.gui.OvalRoi;
+import java.lang.Math;
+import java.util.Random;
+import java.awt.Polygon;
+import java.text.DecimalFormat;				
+import ij.WindowManager;
+import ij.IJ;
+import ij.plugin.frame.RoiManager;
+import ij.process.EllipseFitter;					
+import ij.measure.*;
+import ij.plugin.filter.*;
+import java.awt.event.*;
+
+
+public class Categorize_Ratio_Map implements PlugIn {
+
+	String SEMdirectory, SEMfilename, SEMfiletitle, MIMSdirectory, MIMSfilename, MIMSfiletitle, WriteFolder; 
+	int TotalNumberofCategory;
+	int[] TheLimits;
+	int SEMID, MIMSID;
+	int counter = 1;
+	int ImageMean, ImageMedian, ImageMin, ImageMax;
+	
+	public void run(String arg) {
+
+		GenericDialog GdInitial, GdFinal;
+		boolean WasAbletoCreateFolder;
+		String TempLabel;
+		
+		Crop_the_aligned_Images();
+		do {
+			WasAbletoCreateFolder = Create_the_write_folder(counter);
+			counter++;
+		} while ( WasAbletoCreateFolder == false);
+
+		Save_the_Cropped_Images();
+
+		GdInitial = new GenericDialog("MesoFusion V1.6 Categorize Ratio Maps");
+		GdInitial.addMessage ("This Plugin MesoFusion was developed by Ranjan Ramachandra at NCMIR, UC San Diego.");
+		GdInitial.addNumericField("Total Number of Categories :", 4, 0);
+		GdInitial.showDialog();
+
+		if (GdInitial.wasCanceled() == true){
+			IJ.showMessage("MesoFusion V1.6 Categorize Ratio Maps","MesoFusion was canceled.");
+			return;
+		}
+		else {
+			TotalNumberofCategory = (int)(GdInitial.getNextNumber());	
+		}
+
+		TheLimits = new int[TotalNumberofCategory];
+		GdFinal = new GenericDialog("MesoFusion V1.6 Categorize Ratio Maps");
+		GdFinal.addMessage ("The Min Pixel intensity is : " + String.valueOf(ImageMin) + " Max is: " + String.valueOf(ImageMax) + " Mean is: " + String.valueOf(ImageMean) + " Median is: " + String.valueOf(ImageMedian));
+		GdFinal.addNumericField("The Lower Pixel intensity Limit for Category 1 :", 500, 0);
+
+		for (int i = 1; i < TotalNumberofCategory; i++){
+			TempLabel = "The Upper Pixel intensity Limit for Category " + String.valueOf (i) + " :" ;
+			GdFinal.addNumericField(TempLabel, 500, 0);
+		}
+
+		TempLabel = "The Category " + String.valueOf (TotalNumberofCategory) + " will have Pixel intensities higher than Category " + String.valueOf (TotalNumberofCategory - 1);
+		GdFinal.addMessage (TempLabel);
+		GdFinal.showDialog();
+		
+		if (GdFinal.wasCanceled() == true){
+			IJ.showMessage("MesoFusion V1.6 Categorize Ratio Maps","MesoFusion was canceled, Have a good day.");
+			return;
+		}
+		else {
+			for ( int i =0; i < TotalNumberofCategory; i++){
+				TheLimits[i] = (int)(GdFinal.getNextNumber());	
+			}
+		}
+	
+		Now_Categorize_the_Images ();
+		IJ.showMessage("The Categorized Images will be saved in : " +WriteFolder);
+	} //*****************End of Run
+
+	//******First Crops the same region from both the MIMS and SEM image, so that descrepancy at the edges
+	//*****due to previously performed Warp adjustment are removed.
+	private void Crop_the_aligned_Images(){
+
+		ImagePlus SEMImp, MIMSImp;
+		ImageProcessor SEMIp, MIMSIp;
+		
+		IJ.showMessage("Please open the Warp Corrected and aligned N15/N14 Ratio Map");
+		OpenDialog od = new OpenDialog("Open image .....");
+		MIMSdirectory = od.getDirectory();
+		MIMSfilename = od.getFileName();
+		if (MIMSfilename == null) return;
+		MIMSfiletitle = MIMSfilename.substring(0,MIMSfilename.indexOf("."));
+		Opener openfileseries = new Opener();
+		MIMSImp = openfileseries.openImage(MIMSdirectory,MIMSfilename);
+		MIMSIp = MIMSImp.getProcessor();
+		MIMSID = MIMSImp.getID(); 
+		MIMSImp.show();
+				
+		IJ.showMessage("Please open the Aligned SEM Image");
+		od = new OpenDialog("Open image .....");
+		SEMdirectory = od.getDirectory();
+		SEMfilename = od.getFileName();
+		if (SEMfilename == null) return;
+		SEMfiletitle = SEMfilename.substring(0,SEMfilename.indexOf("."));
+		openfileseries = new Opener();
+		SEMImp = openfileseries.openImage(SEMdirectory,SEMfilename);
+		SEMIp = SEMImp.getProcessor();
+		SEMID = SEMImp.getID();
+		SEMImp.show();
+		
+		if (WindowManager.getCurrentImage().getID() != MIMSID) WindowManager.putBehind();
+		MIMSImp = WindowManager.getImage(MIMSID);
+		WindowManager.setTempCurrentImage(MIMSImp);
+		new WaitForUserDialog("MesoFusion V1.6 Categorize Ratio Maps", "Please select a Rectangular ROI in the MIMS Image, to get rid the discrepancy at the edge otherwise select the whole image, and click the OK button. Tune the Brightness and contrast if necessary. CHECK BEFORE CLICKING!!!").show();
+		MIMSImp = IJ.getImage();
+		MIMSIp = MIMSImp.getProcessor();
+		Rectangle CropRoi = MIMSIp.getRoi();
+		IJ.run("Crop");
+		IJ.wait (300); 
+		MIMSImp.killRoi();
+
+		if (WindowManager.getCurrentImage().getID() != SEMID) WindowManager.putBehind();
+		SEMImp = WindowManager.getImage(SEMID);
+		WindowManager.setTempCurrentImage(SEMImp);
+		SEMIp = SEMImp.getProcessor();
+		SEMImp.setRoi(CropRoi);
+		IJ.run("Crop");
+		IJ.wait (300); 
+	
+	}
+
+	//*****Creates sub-folder to save the images. If the sub folder exists then the image execution stops.
+	protected boolean Create_the_write_folder(int i){
+		
+		//**************** Create the folder to save the corrected Images
+		WriteFolder = MIMSdirectory +  "FINAL" + String.valueOf(i);
+		File CreateFolder = new File (WriteFolder);
+		if (!CreateFolder.exists()){
+			CreateFolder.mkdir();
+			return true;
+		}
+		else {
+			return false;
+		}	
+	}
+
+	//*********Svaes the initial cropped MIMS and SEM images. The images are saved as 16 bit images.
+	protected void Save_the_Cropped_Images(){
+
+		ImagePlus MIMSImp, SEMImp; 
+		ImageProcessor SEMIp,MIMSIp;
+		
+		//************************First Saves the MIMS Image which are always initially 32 bit images
+		if (WindowManager.getCurrentImage().getID() != MIMSID) WindowManager.putBehind();
+		MIMSImp = WindowManager.getImage(MIMSID);
+		WindowManager.setTempCurrentImage(MIMSImp);	
+		MIMSIp = MIMSImp.getProcessor();
+		ImageStatistics stats = MIMSIp.getStatistics();
+		ImageMedian = (int)(stats.median);
+		ImageMean = (int)(stats.mean);
+		ImageMin = (int)(stats.min);
+		ImageMax = (int)(stats.max);
+
+		
+		IJ.run("Enhance Contrast", "saturated=0.35");
+		ImageConverter iConv1 = new ImageConverter(MIMSImp);
+		iConv1.setDoScaling(false);             //******This is very important because the intensity values are counts of Natural ratio. So do not scale.
+		iConv1.convertToGray16();
+		IJ.save (WriteFolder + "//" + MIMSfiletitle + "_FINAL_FULL" + ".tif");
+		MIMSImp.close();	
+		IJ.wait (300); 
+
+		//************************Then Saves the SEM Image. The SEM image can initially be 8 bit, 16 bit or 32 bit. It is always saved as 16 bit.
+		if (WindowManager.getCurrentImage().getID() != SEMID) WindowManager.putBehind();
+		SEMImp = WindowManager.getImage(SEMID);
+		WindowManager.setTempCurrentImage(SEMImp);	
+		SEMIp = SEMImp.getProcessor();
+		
+		//**********commenting this out because it can make the SEM image too bright
+		//IJ.run("Enhance Contrast", "saturated=0.35");               
+
+		//There is some bug with converter. Directly converting to 8 bit to 16 bit creates some issues.
+		//First, up-converting to 32 bit and then down-converting to 16 bit works better.
+			
+		iConv1 = new ImageConverter(SEMImp);
+		iConv1.setDoScaling(true);
+		iConv1.convertToGray32();
+		SEMIp = SEMImp.getProcessor();
+		SEMImp.setProcessor(SEMIp);
+				
+		ImageConverter iConv2 = new ImageConverter(SEMImp);
+		iConv2.setDoScaling(true);        //*******************For the SEM image scale because that will give a good color overlay.
+		iConv2.convertToGray16();
+		SEMIp = SEMImp.getProcessor();
+		SEMImp.setProcessor(SEMIp);
+		IJ.save (WriteFolder + "//" + SEMfiletitle + "_FINAL_FULL" + ".tif");
+		SEMImp.close();	
+		IJ.wait (300); 
+	}
+
+	//*****This creates the various category images as requested by the user.
+	
+	protected void Now_Categorize_the_Images (){
+
+		String TempFileName;
+		
+		for (int i =1; i <= TotalNumberofCategory; i++){
+			Opener openfileseries = new Opener();
+			ImagePlus ImageImp = openfileseries.openImage(WriteFolder + "//", MIMSfiletitle + "_FINAL_FULL" + ".tif");
+			ImageImp.show();
+			ImageProcessor ImageIp = ImageImp.getProcessor();
+			int ImageWidth = ImageImp.getWidth();
+			int ImageHeight = ImageImp.getHeight();
+			int ImagePixels [][] = ImageIp.getIntArray();
+		
+			for (int u = 0; u < ImageWidth; u++){
+				for (int v = 0; v < ImageHeight; v++){
+					if ( i != TotalNumberofCategory){
+						if ( ImagePixels [u][v] < (TheLimits [i-1]) || (ImagePixels [u][v] >= TheLimits [i] ) )ImagePixels [u][v] = 0;
+					}//*************** End of if
+					else{
+						if ( ImagePixels [u][v] < (TheLimits [i-1]) )ImagePixels [u][v] = 0;
+					}
+				}//**************End of ImageHeight For
+			}//**************End of ImageWidth For
+
+			ImageIp.setIntArray(ImagePixels);
+			if ( i != TotalNumberofCategory)
+				TempFileName = String.valueOf(TheLimits [i-1]) + "TO" + String.valueOf(TheLimits [i]) + MIMSfiletitle + "_Category" + ".tif";
+			else 
+				TempFileName = String.valueOf(TheLimits [i-1]) + "TOMax" + MIMSfiletitle + "_Category"  +  ".tif";
+			IJ.run("Enhance Contrast", "saturated=0.35");
+			IJ.save (WriteFolder + "//" + TempFileName);
+			ImageImp.close();	
+		
+		}//***********End of TotalNumberofCategory
+
+	}//*********************End of Now_Categorize_the_Images
+	
+}

@@ -1,0 +1,766 @@
+//*************This Plugin MesoFusion was developed by Ranjan Ramachandra at NCMIR, UC San Diego, Feb 2020. MesoFusion Stands for Mesoscale Fusion.
+//********Although, initially intended to align SEM image with correspoding MIMS image; It can be used to align Images between various Microscopy techniques like Optical, electron microscope and Secondary Ion Mass spectroscopy.
+
+//This program was written by Ranjan Ramachandra and Paul Steinbach at National Center for Microscopy and Imaging Research (NCMIR),
+//University of California, San Diego. For more details please see "Multicolor Electron Microscopy for Simultaneous Visualization of 
+// Multiple Molecular Species" Adams et.al Cell Chemical Biology.
+//***********************Version 1.2
+
+//********************Version Log	
+//**********Version 1.0 : Full functionality.
+//*********Version 1.1  : Named the Plugin MesoFusion. Made changes so that the program does not save in the same folder, but creates a new folder everytime. Made the categorize ratio maps use pixel intensity 
+//**********              instead of natural ratio. The Final color overlay reads the threshold values directly from the filename and need not be manually entered.
+//**********Version 1.2 : Fixed the problem wih flipping the image. Also for rectanular image for some particular cases the Rescale and Resize was not working appropriately, fixed it.
+//**********Version 1.3 : Fixed a problem with flipping the image.
+//***********Version 1.4 : Made more colors available to the User, to facilitate people with color vision deficiency.
+//**********Version 1.5 : Added functionality to do large scale Mosaic.
+//**********Version 1.6 : Debugged some of the bugs in the older versions.
+
+import ij.*;
+import ij.process.*;
+import ij.gui.*;
+import java.awt.*;
+import ij.plugin.filter.*;
+import ij.WindowManager;
+import java.lang.Math;
+import ij.process.ImageStatistics; 
+
+public class Colorize_Ratio_map implements PlugInFilter {
+	ImagePlus imp;
+	GenericDialog Gd;
+	int[] windowList;
+	String[] windowTitles;
+	//boolean BlendingRequired;
+	boolean HistogramStretchingRequired;
+	int[] ColorChannelindex;
+	double[] ColorChannelThreshold;
+
+	int[] ImageMin;
+	int[] ImageMax;
+	int[] ImageDepth;
+	
+	//To add new colors, you need to include them here first.
+	String[] ChannelLabels = {"Choose one", "Exclude", "Conventional", "Red", "Green", "Blue", "Yellow", "Cyan", "Magenta", "Orange", "Sky Blue", "Bluish Green", "Light Yellow", "Vermillion", "Reddish Purple"};
+	
+	public int setup(String arg, ImagePlus imp) {
+		windowList = WindowManager.getIDList();
+		for (int i = 0; i < windowList.length; i++){
+			ImagePlus TempImp = WindowManager.getImage(windowList[i]);
+			ImageProcessor TempIp = TempImp.getProcessor();
+			if (TempIp instanceof FloatProcessor) {
+				IJ.showMessage ("Please convert the 32 bit image to 8 bit, 16 bit or RGB image and then try again");
+				return NO_CHANGES;
+			}
+		}
+			return DOES_8G + DOES_8C + DOES_16 + DOES_RGB;
+	}
+
+	public void run(ImageProcessor ip) {
+
+	    //Dynamic Global array declaration.
+	    
+	    windowTitles = new String[windowList.length];
+	    ColorChannelindex = new int[windowList.length];
+	    ColorChannelThreshold = new double[windowList.length];
+		
+	    ImageMin = new int[windowList.length];
+	    ImageMax = new int[windowList.length];
+	    ImageDepth = new int[windowList.length];
+		Gd = new GenericDialog("MesoFusion V1.6 Color Overlay");
+		
+		boolean AretheInputValuesCorrect;
+		boolean CanCreateDialogbox = Check_if_images_are_fine();
+		if (CanCreateDialogbox == true){
+		        runDialog();
+			Gd.showDialog();
+			if (Gd.wasCanceled()){
+				IJ.error("MesoFusion was canceled");
+			}
+			else {
+				boolean HasUserSelectedCorrectValues = Check_the_User_Input();
+				while (HasUserSelectedCorrectValues == false && Gd.wasCanceled() != true){
+					Gd.wasCanceled();              											//close the old dialog box and start a new one
+					IJ.showMessage ("Please select correct values and try again");
+					Gd = new GenericDialog("MesoFusion V1.6 Color Overlay");
+					re_runDialog_with_previous_values();
+					Gd.showDialog();
+					HasUserSelectedCorrectValues = Check_the_User_Input();
+				}
+
+				if (HasUserSelectedCorrectValues == true && Gd.wasCanceled() != true){
+				
+					Create_the_Overlay_Image();
+					
+					//Once the overlay is created, throw the dialogbox to give the user chance to fine tune level of colors until he cancels the plug-in
+					/*
+					do {
+						Gd.wasCanceled();			 //close the old dialog box and start a new one
+						Gd = new GenericDialog("Colorize MIMS SEM Images");
+						re_runDialog_with_previous_values();
+						Gd.showDialog();
+						HasUserSelectedCorrectValues = Check_the_User_Input();
+						if (HasUserSelectedCorrectValues == true && Gd.wasCanceled() != true) Create_the_Overlay_Image();
+					} while (Gd.wasCanceled() != true);
+					*/
+					IJ.showMessage ("Thanks for using MesoFusion Color Overlay. Have a nice day");
+				}		
+			}		
+		}
+	}	
+
+	//Purpose : Check for the images if they are of the same size etc.... 
+	boolean Check_if_images_are_fine(){
+		//int[] windowList = WindowManager.getIDList();
+	 	ImagePlus TempImp;
+	 	ImageProcessor TempIp;
+		int[] ImageHeight = new int[windowList.length];
+		int[] ImageWidth = new int[windowList.length];
+		
+		//Check if there are open images otherwise display error messages. This should anyway happen because this is a Pluginfilter
+		if (windowList == null){
+			IJ.noImage();
+			return false;
+		}
+		if (windowList.length == 1){
+			IJ.showMessage("You need atleast 2 images for this Plugin. One Conventional TEM image and one Elemental Map");
+			return false;
+		}
+		
+		for (int i = 0; i < windowList.length; i++){
+			TempImp = WindowManager.getImage(windowList[i]);
+			TempIp = TempImp.getProcessor();
+			ImageWidth[i] = TempIp.getWidth();
+			ImageHeight[i] = TempIp.getHeight();	
+		}
+
+		//Check if all the images are of the same size
+		for (int i = 1;i < windowList.length; i++){
+			if ( ImageWidth[i] != ImageWidth[(i-1)]){
+				IJ.showMessage("All open images need to be of the same size.Please check and reload the correct images");
+				return false;	
+			}
+			else if ( ImageHeight[i] != ImageHeight[(i-1)]){
+				IJ.showMessage("All open images need to be of the same size.Please check and reload the correct images");
+				return false;
+			}
+		}
+	
+		return true;
+	}
+
+	//Purpose : Creates the dialog box for the first time with default values
+	void runDialog(){
+		
+		//Adding the fields to check the kind of chemical mapping used
+		Gd.addMessage ("MesoFusion Color Overlay was developed by Ranjan Ramachandra and Paul Steinbach at NCMIR, UC San Diego.");
+		Gd.addCheckbox("Histogram Stretching", true);
+			
+		//Now generating the dialox box depending on the number of images	
+	 	for (int i = 0; i < windowList.length; i++){
+			int ImageHeight, ImageWidth;
+			int LowerLimitValues;
+			String StringLowerLimit;	
+			ImagePlus TempImp = WindowManager.getImage(windowList[i]);
+			ImageProcessor TempIp = TempImp.getProcessor();
+			ImageWidth = TempIp.getWidth();
+			ImageHeight = TempIp.getHeight(); 	
+
+			//Test
+			if (TempIp instanceof ByteProcessor)                    //This is a 8-bit image
+				ImageDepth[i] = 8;
+			else if (TempIp instanceof ShortProcessor)   		//This is a 16-bit image
+				ImageDepth[i] = 16;
+			else if (TempIp instanceof FloatProcessor)		//This is a 32-bit image
+				ImageDepth[i] = 32;	
+			else if (TempIp instanceof ColorProcessor)		//This is a RGB image
+				ImageDepth[i] = 24;
+
+			//For images that are not 32 bits, convert to 32 bits and then convert into 16 bits. This scales the pixels to occupy the entire dynamic range.
+			//But first make the copy, do not modify the original image.
+			ImagePlus TempImpCopy = new ImagePlus();
+			TempImpCopy = NewImage.createImage ("", ImageWidth, ImageHeight, 1, ImageDepth[i],NewImage.FILL_BLACK);			
+			ImageProcessor TempIpCopy = TempImpCopy.getProcessor();
+			TempIpCopy.copyBits(TempIp, 0, 0, Blitter.COPY);			
+			/*
+			if (ImageDepth[i]  !=32) {
+				ImageConverter iConv1 = new ImageConverter(TempImpCopy);
+				iConv1.setDoScaling(true);
+				iConv1.convertToGray32();
+			}
+			ImageConverter iConv2 = new ImageConverter(TempImpCopy);
+			iConv2.setDoScaling(true);
+			iConv2.convertToGray16();
+			TempIpCopy = TempImpCopy.getProcessor();
+			*/
+
+			ImageStatistics stats = ImageStatistics.getStatistics(TempIp, ImageStatistics.MIN_MAX, null);
+			ImageMin[i] = (int)(stats.min);
+			ImageMax[i] = (int)(stats.max);		
+			int Image_Slide_Position = ImageMax[i]/2;
+			windowTitles[i] = TempImp.getTitle();
+
+			StringLowerLimit = windowTitles[i].trim();
+			int StrLength = StringLowerLimit.indexOf("T");
+			if (StrLength < 1)  StrLength = 1;                                 					      	//***************Error trap
+			//IJ.showMessage("The Title is :" +StringLowerLimit);
+			//IJ.showMessage("The String length is :" +StrLength);
+			StringLowerLimit = StringLowerLimit.substring(0,StrLength);
+			//StringLowerLimit = StringLowerLimit.substring(0,2);
+			
+			try{
+				LowerLimitValues = Integer.parseInt(StringLowerLimit.trim());	
+			}
+			catch (NumberFormatException nfe){
+				LowerLimitValues = 0;
+			}
+			
+			Gd.addChoice(windowTitles[i],ChannelLabels,ChannelLabels[0]);
+			//Gd.addSlider ("",ImageMin[i],ImageMax[i], Image_Slide_Position);
+			Gd.addNumericField ("Lower Pixel Intensity Limit: ", LowerLimitValues, 0);
+			//Gd.addNumericField ("Lower Pixel Intensity Limit: ", 500, 0);
+	 	}
+	}
+
+	//Purpose : Re-Creates the dialog box when the user has selected an erroneous value, it remebers the previous selections the user made.
+	void re_runDialog_with_previous_values(){
+
+		//Adding the fields to check the kind of chemical mapping used
+		Gd.addMessage ("MesoFusion Color Overlay was developed by Ranjan Ramachandra and Paul Steinbach at NCMIR, UCSD.");
+		Gd.addCheckbox("Histogram Stretching", true);
+			
+		//Now generating the dialox box depending on the number of images	
+	 	for (int i = 0; i < windowList.length; i++){
+			
+			Gd.addChoice(windowTitles[i],ChannelLabels,ChannelLabels[ColorChannelindex[i]]);
+			//Gd.addSlider ("",ImageMin[i],ImageMax[i], ColorChannelThreshold[i]);
+			Gd.addNumericField ("Input the Lower threshold for the Image :", ColorChannelThreshold[i], 0);	
+			
+	 	}
+	}
+	//Purpose : Checks for discrepancies in the input values the user has selected
+	boolean Check_the_User_Input(){
+		
+		//Now getting the checkbox selection values
+		HistogramStretchingRequired = Gd.getNextBoolean();
+		
+		//Now getting the color choice index (number corresponds to the drop down list)
+		for (int i = 0; i < windowList.length; i++){
+			ColorChannelindex[i] = Gd.getNextChoiceIndex();
+		}
+		
+		//Now getting the Color threshold values
+		for (int i = 0; i < windowList.length; i++){
+			ColorChannelThreshold[i] = Gd.getNextNumber();
+		}
+			
+		//Checking to see if the drop down values have been selected for all the images
+		for (int i = 0; i < windowList.length; i++){
+			if (ColorChannelindex[i] == 0){
+				IJ.showMessage ("The Color Channel has not been chosen for atleast one of the images");
+				return false;
+			}
+		}
+
+		//Checking to see if no two images have the same color option selected
+		for (int i = 0; i < windowList.length; i++){
+			if (ColorChannelindex[i] != 1){	//So that you can have as many excude options for mutliple images
+				for (int k = (i + 1); k < windowList.length; k++){
+					if (ColorChannelindex[k] != 1 && ColorChannelindex[k] == ColorChannelindex[i]){
+						IJ.showMessage ("Any two images cannot have the same color channel");
+						return false;	
+					}
+				}
+			}
+		}
+
+		//Checking to see if atleast one of the images is a conventional image selection
+		for (int i = 0; i < windowList.length; i++){
+			if (ColorChannelindex[i] == 2){
+				return true;
+			}
+		}
+		IJ.showMessage ("There should be atleast one conventional Image");
+		return false;		
+	}
+
+	//Purpose : This is the main part of the program which Creates the Final Overlay Image
+	void Create_the_Overlay_Image(){
+
+		ImagePlus DummyImp = WindowManager.getImage(windowList[0]);
+		ImageProcessor DummyIp = DummyImp.getProcessor();
+		
+		//Creating the Overlay Image of RGB format
+		String title = "MesoFusion Color Overlay";
+		int ImageWidth = DummyIp.getWidth();
+		int ImageHeight = DummyIp.getHeight();
+		ImagePlus OverlayImp = new ImagePlus();
+		OverlayImp = NewImage.createRGBImage (title, ImageWidth, ImageHeight, 1, NewImage.FILL_BLACK);	
+		ImageProcessor OverlayIp;
+		OverlayIp = OverlayImp.getProcessor();
+		
+		//First get and copy the conventional image
+		for (int i = 0; i < windowList.length; i++){
+			if (ColorChannelindex[i] == 2){
+				ImagePlus TEMGreyImp = WindowManager.getImage(windowList[i]);
+				ImageProcessor TEMGreyIp = TEMGreyImp.getProcessor();
+				
+				//Always make a copy of the original, so that original remains unchanged
+				ImagePlus TEMGreyImpCopy = new ImagePlus();
+				TEMGreyImpCopy = NewImage.createImage ("", ImageWidth, ImageHeight, 1, ImageDepth[i],NewImage.FILL_BLACK);	
+				ImageProcessor TEMGreyIpCopy = TEMGreyImpCopy.getProcessor();
+				TEMGreyIpCopy.copyBits(TEMGreyIp, 0, 0, Blitter.COPY);
+
+				//There is some bug with converter. Directly converting to 8 bit creates some issues.
+				//First, up-converting to 32 bit and then down-converting to 8 bit works better.
+				//Now convert to 8 bits and copy to the overlay image.
+				ImageConverter iConv1 = new ImageConverter(TEMGreyImpCopy);
+				iConv1.setDoScaling(true);
+				iConv1.convertToGray32();
+				TEMGreyIpCopy = TEMGreyImpCopy.getProcessor();
+				
+				ImageConverter iConv2 = new ImageConverter(TEMGreyImpCopy);
+				iConv2.setDoScaling(true);
+				iConv2.convertToGray8();
+				TEMGreyIpCopy = TEMGreyImpCopy.getProcessor();
+				OverlayIp.copyBits(TEMGreyIpCopy, 0, 0, Blitter.COPY);	
+			}
+		}    // End of copying the conventional Image
+		
+		//Now convert image to a 2-D array for faster processing
+		int OverlayPixels [][] =  OverlayIp.getIntArray();
+
+		//Now color code the pixels that contain elemental signal in the overlay image with the respective colors....
+		for (int i = 0; i < windowList.length; i++){
+			if (ColorChannelindex[i] != 1 && ColorChannelindex[i] != 2){              //Not for the conventional Image or the Images that have exclude option
+				
+				ImagePlus TempImp = WindowManager.getImage(windowList[i]);
+				ImageProcessor TempIp = TempImp.getProcessor();
+				
+				//Always make a copy of the original, so that original remains unchanged
+				ImagePlus TempImpCopy = new ImagePlus();
+				TempImpCopy = NewImage.createImage ("", ImageWidth, ImageHeight, 1, ImageDepth[i],NewImage.FILL_BLACK);	
+				ImageProcessor TempIpCopy = TempImpCopy.getProcessor();
+				TempIpCopy.copyBits(TempIp, 0, 0, Blitter.COPY);
+
+				//Check if histogram stretching is required	
+				if (HistogramStretchingRequired == true)	
+					TempIpCopy = Stretch_the_Histogram (TempIpCopy, ImageHeight, ImageWidth, ImageDepth[i]);
+				
+				
+				//There seems to be a bug with the converter. First, upconverting to 32 bit and then down-converting to 8 bit seems to work better.
+				
+				ImageConverter iConv1 = new ImageConverter(TempImpCopy);
+				iConv1.setDoScaling(true);
+				iConv1.convertToGray32();
+				TempIpCopy = TempImpCopy.getProcessor();
+				
+				ImageConverter iConv2 = new ImageConverter(TempImpCopy);
+				iConv2.setDoScaling(true);
+				iConv2.convertToGray8();
+				IJ.wait(300);
+				TempIpCopy = TempImpCopy.getProcessor();
+				
+				int TempPixels [][] = TempIpCopy.getIntArray();
+				
+				//Now get the threshold value after conversion to 8-bit
+				int ColorChannelThresholdafterConversion = Get_the_converted_threshold (ImageMin[i], ImageMax[i], ImageDepth[i], ColorChannelThreshold[i]);
+								
+				for (int u = 0; u < ImageWidth; u++){
+					for (int v = 0; v < ImageHeight; v++){
+						if ( TempPixels [u][v] >= ColorChannelThresholdafterConversion){
+							OverlayPixels [u][v] = Get_the_Colorized_Pixel(ColorChannelindex[i], TempPixels [u][v] , OverlayPixels [u][v]);
+						}
+					}
+				}
+			}
+		}	
+	
+		//First copy the GreyScale TEM image into an array. Then use this to add the greyscale TEM  with transparency to the color values 
+		for (int i = 0; i < windowList.length; i++){
+			if (ColorChannelindex[i] == 2){
+				ImagePlus TEMGreyImp = WindowManager.getImage(windowList[i]);
+				ImageProcessor TEMGreyIp = TEMGreyImp.getProcessor();
+				
+				//Always make a copy of the original, so that original remains unchanged
+				ImagePlus TEMGreyImpCopy = new ImagePlus();
+				TEMGreyImpCopy = NewImage.createImage ("", ImageWidth, ImageHeight, 1, ImageDepth[i],NewImage.FILL_BLACK);	
+				ImageProcessor TEMGreyIpCopy = TEMGreyImpCopy.getProcessor();
+				TEMGreyIpCopy.copyBits(TEMGreyIp, 0, 0, Blitter.COPY);
+
+				ImageConverter iConv1 = new ImageConverter(TEMGreyImpCopy);
+				iConv1.setDoScaling(true);
+				iConv1.convertToGray32();
+				TEMGreyIpCopy = TEMGreyImpCopy.getProcessor();
+				
+				ImageConverter iConv2 = new ImageConverter(TEMGreyImpCopy);
+				iConv2.setDoScaling(true);
+				iConv2.convertToGray8();
+				TEMGreyIpCopy = TEMGreyImpCopy.getProcessor();
+				int TEMGreyPixels [][] = TEMGreyIpCopy.getIntArray();
+
+				for (int u = 0; u < ImageWidth; u++){
+					for (int v = 0; v < ImageHeight; v++){
+						OverlayPixels [u][v] = Add_the_Grey_value_with_transparency_on_Color (TEMGreyPixels [u][v], OverlayPixels [u][v]);
+					}
+				}
+			}
+		}    // End of adding the greyscale with transparency to the color values
+		
+		OverlayIp.setIntArray(OverlayPixels);
+		OverlayImp.show();
+	}
+
+	//Purpose : Converts the individual greyscale elemental maps or images images to their respective colors. The colors are divided in the three basic colors Red, Green and blue. Colors for a particular element (or range of natural ratio)
+	//          is chosen by the User. A particular pixel may have more than one element present (e.g. may have both Ce and Pr) and if blending option has been choosen than both the colors have to be represented in that particular pixel.
+	//          So, if the 2 colors that have been choosen are Red and Magenta, and the pixel has both the elements; then the pixel will have red color due to both element represented by red color and the element represented by Magenta.
+	
+	int Get_the_Colorized_Pixel(int ColorRequired, int GreyPixel, int ColorPixel){
+
+		int RedValue = (ColorPixel & 0xff0000) >> 16;
+		int GreenValue = (ColorPixel & 0x00ff00) >> 8;
+		int BlueValue = (ColorPixel & 0x0000ff);
+		 
+		switch (ColorRequired){
+			case 0: IJ.showMessage("There is some problem with the program logic. You can not get colorized pixel, when no color is selected");
+				break;
+			case 1: IJ.showMessage("There is some problem with the program logic. You can not get colorized pixel, when you have excluded the image");
+				break;
+			case 2: IJ.showMessage("There is some problem with the program logic. You can not get colorized pixel, when conventional is selected");
+				break;
+			//Now for the red color
+			case 3: if (RedValue == GreenValue && RedValue == BlueValue){                         //Which means it is a grey pixel and no color subsitution has been done yet.
+						RedValue = GreyPixel;
+						GreenValue = 0;
+						BlueValue = 0;	
+					}
+					else if	(GreyPixel > RedValue && GreyPixel > GreenValue && GreyPixel > BlueValue){           // Do the red color subsitution only if intensity is greater than intensity of the color already present
+						RedValue = GreyPixel;
+						GreenValue = 0;
+						BlueValue = 0;
+					}
+				break;
+			//Now for the Green color
+			case 4: if (RedValue == GreenValue && RedValue == BlueValue){			//Which means it is a grey pixel and no color subsitution has been done yet.
+						RedValue = 0;
+						GreenValue = GreyPixel;
+						BlueValue = 0;
+					}
+					else if  (GreyPixel > RedValue && GreyPixel > GreenValue && GreyPixel > BlueValue){           // Do the green color subsitution only if intensity is greater than intensity of the color already present
+						RedValue = 0;
+						GreenValue = GreyPixel;
+						BlueValue = 0;
+					}					
+				break;
+			//Now for the blue color
+			case 5: if (RedValue == GreenValue && RedValue == BlueValue){			//Which means it is a grey pixel and no color subsitution has been done yet.
+						RedValue = 0;
+						GreenValue = 0;
+						BlueValue = GreyPixel;
+					}
+					else if  (GreyPixel > RedValue && GreyPixel > GreenValue && GreyPixel > BlueValue){           // Do the blue color subsitution only if intensity is greater than intensity of the color already present
+						RedValue = 0;
+						GreenValue = 0;
+						BlueValue = GreyPixel;
+					}		
+				break;
+			//Now for the Yellow Color
+			case 6: if (RedValue == GreenValue && RedValue == BlueValue){			//Which means it is a grey pixel and no color subsitution has been done yet.
+						RedValue = GreyPixel;
+						GreenValue = GreyPixel;
+						BlueValue = 0;
+					}
+					else if  (GreyPixel > RedValue && GreyPixel > GreenValue && GreyPixel > BlueValue){           // Do the yellow color subsitution only if intensity is greater than intensity of the color already present
+						RedValue = GreyPixel;
+						GreenValue = GreyPixel;
+						BlueValue = 0;
+					}
+				break;
+			//Now for the Cyan Color
+			case 7: if (RedValue == GreenValue && RedValue == BlueValue){			//Which means it is a grey pixel and no color subsitution has been done yet.
+						RedValue = 0;
+						GreenValue = GreyPixel;
+						BlueValue = GreyPixel;
+					}
+					else if  (GreyPixel > RedValue && GreyPixel > GreenValue && GreyPixel > BlueValue){           // Do the cyan color subsitution only if intensity is greater than intensity of the color already present
+						RedValue = 0;
+						GreenValue = GreyPixel;
+						BlueValue = GreyPixel;				
+					}
+				break;
+			//Now for Magenta
+			case 8: if (RedValue == GreenValue && RedValue == BlueValue){			//Which means it is a grey pixel and no color subsitution has been done yet.
+						RedValue = GreyPixel;
+						GreenValue = 0;
+						BlueValue = GreyPixel;
+					}
+					else if  (GreyPixel > RedValue && GreyPixel > GreenValue && GreyPixel > BlueValue){           // Do the Magenta color subsitution only if intensity is greater than intensity of the color already present
+						RedValue = GreyPixel;
+						GreenValue = 0;
+						BlueValue = GreyPixel;
+					}
+				break;
+			//Now for Orange (R,G,B) = (230,159,0)
+			case 9: if (RedValue == GreenValue && RedValue == BlueValue){			//Which means it is a grey pixel and no color subsitution has been done yet.
+						RedValue = (int)(230.0 / 255.0 * GreyPixel);
+						GreenValue = (int)(159.0 / 255.0 * GreyPixel);
+						BlueValue = 0;
+					}
+					else if  (GreyPixel > RedValue && GreyPixel > GreenValue && GreyPixel > BlueValue){           // Do the Orange color subsitution only if intensity is greater than intensity of the color already present
+						RedValue = (int)(230.0 / 255.0 * GreyPixel);
+						GreenValue = (int)(159.0 / 255.0 * GreyPixel);
+						BlueValue = 0;
+					}
+				break;
+			//Now for Sky Blue (R,G,B) = (86,180,233)
+			case 10: if (RedValue == GreenValue && RedValue == BlueValue){			//Which means it is a grey pixel and no color subsitution has been done yet.
+						RedValue = (int)( 86.0 / 255.0 * GreyPixel);
+						GreenValue = (int)(180.0 / 255.0 * GreyPixel);
+						BlueValue = (int)(233.0 / 255.0 * GreyPixel);
+					}
+					else if  (GreyPixel > RedValue && GreyPixel > GreenValue && GreyPixel > BlueValue){           // Do the Sky Blue color subsitution only if intensity is greater than intensity of the color already present
+						RedValue = (int)( 86.0 / 255.0 * GreyPixel);
+						GreenValue = (int)(180.0 / 255.0 * GreyPixel);
+						BlueValue = (int)(233.0 / 255.0 * GreyPixel);
+					}
+				break;
+			//Now for Bluish Green (R,G,B) = (0,158,115)
+			case 11: if (RedValue == GreenValue && RedValue == BlueValue){			//Which means it is a grey pixel and no color subsitution has been done yet.
+						RedValue = 0;
+						GreenValue = (int)(158.0 / 255.0 * GreyPixel);
+						BlueValue = (int)(115.0 / 255.0 * GreyPixel);
+					}
+					else if  (GreyPixel > RedValue && GreyPixel > GreenValue && GreyPixel > BlueValue){           // Do the Bluish Green color subsitution only if intensity is greater than intensity of the color already present
+						RedValue = 0;
+						GreenValue = (int)(158.0 / 255.0 * GreyPixel);
+						BlueValue = (int)(115.0 / 255.0 * GreyPixel);
+					}
+				break;
+			//Now for Light Yellow (R,G,B) = (240,228,66)
+			case 12: if (RedValue == GreenValue && RedValue == BlueValue){			//Which means it is a grey pixel and no color subsitution has been done yet.
+						RedValue = (int)(240.0 / 255.0 * GreyPixel);
+						GreenValue = (int)(228.0 / 255.0 * GreyPixel);
+						BlueValue = (int)(66.0 / 255.0 * GreyPixel);
+					}
+					else if  (GreyPixel > RedValue && GreyPixel > GreenValue && GreyPixel > BlueValue){           // Do the Light Yellow color subsitution only if intensity is greater than intensity of the color already present
+						RedValue = (int)(240.0 / 255.0 * GreyPixel);
+						GreenValue = (int)(228.0 / 255.0 * GreyPixel);
+						BlueValue = (int)(66.0 / 255.0 * GreyPixel);
+					}
+				break;
+			//Now for Vermillion (R,G,B) = (213,94,0)
+			case 13: if (RedValue == GreenValue && RedValue == BlueValue){			//Which means it is a grey pixel and no color subsitution has been done yet.
+						RedValue = (int)(213.0 / 255.0 * GreyPixel);
+						GreenValue = (int)(94.0 / 255.0 * GreyPixel);
+						BlueValue = 0;
+					}
+					else if  (GreyPixel > RedValue && GreyPixel > GreenValue && GreyPixel > BlueValue){           // Do the Vermillion color subsitution only if intensity is greater than intensity of the color already present
+						RedValue = (int)(213.0 / 255.0 * GreyPixel);
+						GreenValue = (int)(94.0 / 255.0 * GreyPixel);
+						BlueValue = 0;
+					}
+				break;
+				//Now for Reddish Purple (R,G,B) = (204,121,167)
+				case 14: if (RedValue == GreenValue && RedValue == BlueValue){			//Which means it is a grey pixel and no color subsitution has been done yet.
+						RedValue = (int)(204.0 / 255.0 * GreyPixel);
+						GreenValue = (int)(121.0 / 255.0 * GreyPixel);
+						BlueValue = (int)(167.0 / 255.0 * GreyPixel);
+					}
+					else if  (GreyPixel > RedValue && GreyPixel > GreenValue && GreyPixel > BlueValue){           // Do the Reddish Purple color subsitution only if intensity is greater than intensity of the color already present
+						RedValue = (int)(204.0 / 255.0 * GreyPixel);
+						GreenValue = (int)(121.0 / 255.0 * GreyPixel);
+						BlueValue = (int)(167.0 / 255.0 * GreyPixel);
+					}
+				break;
+		}
+		
+		if (RedValue > 255) RedValue = 255;
+		if (GreenValue > 255) GreenValue = 255;
+		if (BlueValue > 255) BlueValue = 255;
+		
+		ColorPixel = ((RedValue & 0xff)<<16)|((GreenValue & 0xff)<<8)|BlueValue & 0xff;
+		return ColorPixel;
+	}
+
+
+
+	//Purpose : When blending is used, the pixel values are divided by 3, to accomdate for the mixed colors. But for example ,if the color combination is pure (Red + Green + Blue) then you can Re-stretch the pixels.
+	//          The color values can not be read from all the images simulatanously because the images can be very big. This is a kind of workaround.
+	int [][] Restretch_the_Pixels_for_Blending_Option (int [][] ThePixels, int ImageHeight, int ImageWidth){
+		// First check if all the color pixels are less than half full
+		boolean AllColorPixelsLessThanHalfFull = true;
+		boolean AllColorPixelsLessThanThirdFull = true;
+		 
+		for (int u = 0; u < ImageWidth; u++){
+			for (int v = 0; v < ImageHeight; v++){
+				int ColorPixel = ThePixels [u][v]; 	
+				int RedValue = (ColorPixel & 0xff0000) >> 16;
+				int GreenValue = (ColorPixel & 0x00ff00) >> 8;
+				int BlueValue = (ColorPixel & 0x0000ff);
+				if ( RedValue != GreenValue || RedValue != BlueValue){   //This means this is a color pixel and not a conventional pixel.
+					if ( RedValue > 255/2 || GreenValue > 255/2 || BlueValue > 255/2){     
+						AllColorPixelsLessThanHalfFull = false;
+						AllColorPixelsLessThanThirdFull = false;
+						return ThePixels;
+					}
+					else if ( RedValue > 255/3 || GreenValue > 255/3 || BlueValue > 255/3){
+						AllColorPixelsLessThanThirdFull = false;	
+					}
+				}
+			}
+		}
+		// Now above check is successfull then execute the code below.
+		
+		if ( AllColorPixelsLessThanThirdFull == true){
+			for (int u = 0; u < ImageWidth; u++){
+				for (int v = 0; v < ImageHeight; v++){
+					int ColorPixel = ThePixels [u][v]; 	
+					int RedValue = (ColorPixel & 0xff0000) >> 16;
+					int GreenValue = (ColorPixel & 0x00ff00) >> 8;
+					int BlueValue = (ColorPixel & 0x0000ff);
+					if ( RedValue != GreenValue || RedValue != BlueValue){   //This means this is a color pixel and not a conventional pixel.
+						if ( RedValue <= 255/3 && GreenValue <= 255/3 && BlueValue <= 255/3){
+							RedValue = RedValue * 3; if (RedValue > 255) RedValue = 255; 
+							GreenValue = GreenValue * 3; if (GreenValue > 255) GreenValue = 255;
+							BlueValue = BlueValue * 3; if (BlueValue > 255) BlueValue = 255;
+							ColorPixel = ((RedValue & 0xff)<<16)|((GreenValue & 0xff)<<8)|BlueValue & 0xff;
+							ThePixels [u][v] = ColorPixel;
+						}
+					}
+				}
+			}
+		}
+		
+		else if ( AllColorPixelsLessThanHalfFull == true){
+			for (int u = 0; u < ImageWidth; u++){
+				for (int v = 0; v < ImageHeight; v++){
+					int ColorPixel = ThePixels [u][v]; 	
+					int RedValue = (ColorPixel & 0xff0000) >> 16;
+					int GreenValue = (ColorPixel & 0x00ff00) >> 8;
+					int BlueValue = (ColorPixel & 0x0000ff);
+					if ( RedValue != GreenValue || RedValue != BlueValue){   //This means this is a color pixel and not a conventional pixel.
+						if ( RedValue <= 255/2 && GreenValue <= 255/2 && BlueValue <= 255/2){
+							RedValue = RedValue * 2; if (RedValue > 255) RedValue = 255; 
+							GreenValue = GreenValue * 2; if (GreenValue > 255) GreenValue = 255;
+							BlueValue = BlueValue * 2; if (BlueValue > 255) BlueValue = 255;
+							ColorPixel = ((RedValue & 0xff)<<16)|((GreenValue & 0xff)<<8)|BlueValue & 0xff;
+							ThePixels [u][v] = ColorPixel;
+						}
+					}
+				}
+			}
+		}
+		return ThePixels;
+	}
+
+	//Purpose :  This calculates the transparency of the color or how much grey of the TEM conventional image should the color pixel have.
+	int Add_the_Grey_value_with_transparency_on_Color (int TEMGreyPixel, int OverlayColorPixel){
+		
+		double TransparencyValue;
+		int OverlaidGreyOnColorValue;
+
+		int RedValue = (OverlayColorPixel & 0xff0000) >> 16; 
+		int GreenValue = (OverlayColorPixel & 0x00ff00) >> 8; 
+		int BlueValue = (OverlayColorPixel & 0x0000ff); 
+
+		if ( RedValue != GreenValue || RedValue != BlueValue) {  			   //This means this is a color pixel and not a conventional pixel.
+		
+			int Maximum_color_Value = Math.max(Math.max(RedValue,GreenValue),BlueValue);
+			TransparencyValue = Maximum_color_Value / 255.0 ; if ( TransparencyValue > 1 ) TransparencyValue = 1; if ( TransparencyValue < 0 ) TransparencyValue = 0;
+
+			RedValue = RedValue + (int) ((1 - TransparencyValue) * TEMGreyPixel); if (RedValue > 255) RedValue = 255;
+			GreenValue = GreenValue + (int) ((1 - TransparencyValue) * TEMGreyPixel); if (GreenValue > 255) GreenValue = 255;
+			BlueValue = BlueValue + (int) ((1 - TransparencyValue) * TEMGreyPixel); if (BlueValue > 255) BlueValue = 255;
+
+		}
+			
+		OverlaidGreyOnColorValue = ((RedValue & 0xff)<<16)|((GreenValue & 0xff)<<8)|BlueValue & 0xff;
+		return OverlaidGreyOnColorValue;
+									
+	}
+
+	//Purpose : When a 16 bit or 32 bit image is converted to 8-bit internally by imageJ, it is difficult to know what would be corresponding value of the user selected threshold in 8-bits.
+	//So creates a dummy image of 3 pixels, having the max, min and threshold values of the image. Then, converts it into 8-bit and finds out what the threshold will be now.
+	int Get_the_converted_threshold (int ImageMinimum,int ImageMaximum,int ImageDepthBits, double ColorChannelThreshold){
+
+		
+		int TheConvertedThreshold;
+
+		ImagePlus ThresholdImageImp = new ImagePlus();
+		ThresholdImageImp = NewImage.createImage ("Threshold_Image", 3, 1, 1, ImageDepthBits,NewImage.FILL_BLACK);	
+		ImageProcessor ThresholdImageIp = ThresholdImageImp.getProcessor();
+		ThresholdImageIp.putPixel (0,0,ImageMinimum);
+		ThresholdImageIp.putPixel (1,0,ImageMaximum);
+		ThresholdImageIp.putPixel (2,0,(int)(ColorChannelThreshold));
+
+		//Check if histogram stretching is required	
+		if (HistogramStretchingRequired == true)	
+			ThresholdImageIp = Stretch_the_Histogram (ThresholdImageIp, 1, 3, ImageDepthBits);
+
+		//There is a probable a bug in the converter. Converting a 16 or 24 bit image directly to 8 bits can cause errors.
+		//First upconverting it to 32 bit and then downconverting to 8 bits seem to work better.
+		ImageConverter iConv1 = new ImageConverter(ThresholdImageImp);
+		iConv1.setDoScaling(true);
+		iConv1.convertToGray32();
+		ThresholdImageIp = ThresholdImageImp.getProcessor();
+
+		ImageConverter iConv2 = new ImageConverter(ThresholdImageImp);
+		iConv2.setDoScaling(true);
+		iConv2.convertToGray8();
+		ThresholdImageIp = ThresholdImageImp.getProcessor();
+
+		TheConvertedThreshold = ThresholdImageIp.getPixel(2,0);
+		
+		return TheConvertedThreshold;
+		
+	}
+	
+	//Purpose : To stretch the Histogram. Suppose the threshold value for a 8-bit is selected to be 200, then there are only 55 levels for the representation of the color. 
+	//What this does is for levels (200 to 255) is strecthed to occupy (40 to 255), so you will have more degrees of color.
+	
+	ImageProcessor Stretch_the_Histogram (ImageProcessor ElementalIp, int ImageHeight, int ImageWidth, int ImageDepthBits){
+		// To keep the stretching equal for all the colors, the Fmin and Fmax are chosen as the least and max values of all the grey elemental images
+		double Fmin = 65535;      //use the threshold rather than ImageMin because you want stretch only those pixels whose intensity is above the threshold.
+		double Fmax = 0;
+		
+		int ThePixels[][] = ElementalIp.getIntArray();
+		
+		for (int i = 0; i < windowList.length; i++){
+			if ( ColorChannelindex[i] != 2 && ColorChannelindex[i] != 1 && ColorChannelThreshold[i] < Fmin) Fmin = ColorChannelThreshold[i];        //exclude the Conventional TEM image
+		}
+
+		for (int i = 0; i < windowList.length; i++){
+			if ( ColorChannelindex[i] != 2 && ColorChannelindex[i] != 1 && ImageMax[i] > Fmax) Fmax = ImageMax[i];        //exclude the Conventional TEM image
+		}
+
+
+		
+		//The Histogram stretching alogorithm stretches from 0 to maximum value. You dont want to start from zero but 10000 for 16 or 32 bit and 40 for 8 bit images
+		if (ImageDepthBits == 16 || ImageDepthBits == 32){                              //for a 16 or 32 bit image 
+		
+			Fmin = (((10000.0 * Fmax / 65535.0) - Fmin) / (10000.0/65535.0 - 1));         //modify Fmin so that the threshold intensity doesnt start from 0 but 10000
+			for (int u = 0; u < ImageWidth; u++){
+				for (int v = 0; v < ImageHeight; v++){
+					ThePixels[u][v] = (int)((ThePixels[u][v] - Fmin) * 65535 /(Fmax - Fmin));
+					if (ThePixels[u][v] < 0) ThePixels[u][v] = 0;
+					if (ThePixels[u][v] > 65535) ThePixels[u][v] = 65535; 
+				}
+			}
+		}
+		else						//for 8 bit or RGB image
+		{
+			Fmin = (((40.0 * Fmax / 255.0) - Fmin) / (40.0/255.0 - 1));         //modify Fmin so that the threshold intensity doesnt start from 0 but 40
+			for (int u = 0; u < ImageWidth; u++){
+				for (int v = 0; v < ImageHeight; v++){
+					ThePixels[u][v] = (int)((ThePixels[u][v] - Fmin) * 255 /(Fmax - Fmin));
+					if (ThePixels[u][v] <0) ThePixels[u][v] = 0;
+					if (ThePixels[u][v] > 255) ThePixels[u][v] = 255;
+				}
+			}
+		}
+
+		ElementalIp.setIntArray(ThePixels);
+		return ElementalIp;
+	}
+
+}
+	

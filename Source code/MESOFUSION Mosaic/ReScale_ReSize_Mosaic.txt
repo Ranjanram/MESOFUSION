@@ -1,0 +1,578 @@
+//*************This Plugin MesoFusion was developed by Ranjan Ramachandra at NCMIR, UC San Diego, Feb 2020. MesoFusion Stands for Mesoscale Fusion.
+//********Although, initially intended to align SEM image with correspoding MIMS image; It can be used to align Images between various Microscopy techniques like Optical, electron microscope and Secondary Ion Mass spectroscopy.
+
+//**********This Plugin does a rough alignment of the SEM image to the MIMS image for any rotation and translation.It also matches the Field of View (FOV) of the SEM image
+//**********to the FOV of the MIMS image. Generally, the SEM images have a much larger FOV than the MIMS image, and the SEM image 
+//*******is cropped to match the MIMS image. The Program can handle the vice versa too, i.e. MIMS image having a larger FOV.
+//************************Version 1.2
+
+//********************Version Log	
+//**********Version 1.0 : Full functionality.
+//*********Version 1.1  : Named the Plugin MesoFusion. Made changes so that the program does not save in the same folder, but creates a new folder everytime. Made the categorize ratio maps use pixel intensity 
+//**********              instead of natural ratio. The Final color overlay reads the threshold values directly from the filename and need not be manually entered.
+//**********Version 1.2 : Fixed the problem wih flipping the image. Also for rectanular image for some particular cases the Rescale and Resize was not working appropriately, fixed it.
+//**********Version 1.3 : Fixed another problem related to flipping.
+//***********Version 1.4 : Made more colors available to the User, to facilitate people with color vision deficiency.
+//**********Version 1.5 : Added the functionality for Mosaic
+//**********Version 1.6 : Debugged some of the bugs.
+
+
+import ij.*;
+import ij.process.*;
+import ij.gui.*;
+import java.awt.*;
+import ij.plugin.*;
+import ij.plugin.frame.*;
+import ij.io.*;
+import java.io.*;
+import java.util.*;
+import ij.macro.*;
+import ij.plugin.PlugIn; 
+import ij.plugin.frame.ThresholdAdjuster;
+import ij.plugin.filter.PlugInFilter;
+import ij.gui.OvalRoi;
+import java.lang.Math;
+import java.util.Random;
+import java.awt.Polygon;
+import java.text.DecimalFormat;				
+import ij.WindowManager;
+import ij.IJ;
+import ij.plugin.frame.RoiManager;
+import ij.process.EllipseFitter;					
+import ij.measure.*;
+import ij.plugin.filter.*;
+import java.awt.event.*;
+
+//*******This Plugin is to align multiple Tiles of the MIMS image to a single SEM image, so as to cleared a colored mosaic.
+//********The each of the MIMS image or tile is aligned with the same region in the SEM image, and adjusted for any Warping and color coded.
+
+public class ReScale_ReSize_Mosaic implements PlugIn {
+
+	String SEMdirectory, SEMfilename, SEMfiletitle, MIMSdirectory, MIMSfilename, MIMSfiletitle, WriteFolder, TileFolder; 
+	Rectangle InitialRoi, FinalRoi;
+	int SEMID,MIMSID;
+	int  ReScaleSizeX, ReScaleSizeY;
+	Double RelativeScaleSEM;
+	boolean MIMShasLargerFOV = false;
+	Double FOVincreaseFactor = 1.0;						    //******Make the FOV of one image slightly larger tham FOV of the other, by a factor of 1.1
+	int SEMX1, SEMY1, SEMX2, SEMY2;                     	//******************Select Point ROI of SEM Image
+	int MIMSX1, MIMSY1, MIMSX2, MIMSY2;					   	//******************Select Point ROI of MIMS Image
+	boolean WasFlippedVertical = false;
+	boolean WasFlippedHorizontal = false;
+	int NumberofTiles;
+	int TileCount = 1;
+	int MIMSCropWidth, MIMSCropHeight;
+	boolean ROIexceededImage = false;
+	
+	
+	public void run(String arg) {
+
+		GenericDialog Gd;
+		boolean WasAbletoCreateFolder = false;
+		boolean WasN15N14ratioMapUsed;
+		int counter = 1;
+		
+		Gd = new GenericDialog ("MesoFusion V1.6 Rescale and Resize for large scale Mosaic");
+		Gd.addMessage ("This Plugin MesoFusion was developed by Ranjan Ramachandra at NCMIR, UC San Diego.");	
+		Gd.addNumericField("Total Number of Tiles", 10, 0);
+		Gd.addCheckbox("Are you directly using the desired Ratiometric map (N15/N14 or C13/C12) for the alignment", false);
+		Gd.showDialog();		
+
+		if (Gd.wasCanceled() == true){
+			IJ.showMessage("MesoFusion V1.6 Rescale and Resize for large scale Mosaic","MesoFusion was canceled.");
+			return;
+		}
+		else {
+			NumberofTiles = (int)(Gd.getNextNumber());
+			WasN15N14ratioMapUsed = Gd.getNextBoolean();	
+		}
+
+		Open_the_Images();
+		do {
+			WasAbletoCreateFolder = Create_the_write_folder(counter);
+			counter++;
+		} while ( WasAbletoCreateFolder == false);
+
+		Flip_the_Images();
+		Orient_the_Images();
+		Save_the_Composite_SEM_Image();
+
+		for (TileCount = 1;  TileCount <= NumberofTiles; TileCount++){
+			if ( TileCount >= 2) {                       //For the Tile 1, the images are already open
+				Open_the_Images();
+			}
+			Create_the_Tile_folder(TileCount);
+			Pick_the_SEM_TILE();
+			Rescale_MIMS_Image();
+			Save_the_Tile_Images();
+			
+			if (WasN15N14ratioMapUsed == false){
+				Make_the_same_corrections_for_N15N14map();
+			}
+			
+		}
+		
+		IJ.showMessage("The Scaled Images will be saved in : " +WriteFolder);
+	
+	}
+
+	//*****This subroutine opens the images and records the unique Image ID.
+	protected void Open_the_Images(){
+
+		ImagePlus SEMImp, MIMSImp;
+		ImageProcessor SEMIp, MIMSIp;
+
+		IJ.showMessage("Please open the MIMS Tile Number : " +TileCount);
+		OpenDialog od = new OpenDialog("Open image .....");
+		MIMSdirectory = od.getDirectory();
+		MIMSfilename = od.getFileName();
+		if (MIMSfilename == null) return;
+		MIMSfiletitle = MIMSfilename.substring(0,MIMSfilename.indexOf("."));
+		Opener openfileseries = new Opener();
+		MIMSImp = openfileseries.openImage(MIMSdirectory,MIMSfilename);
+		MIMSIp = MIMSImp.getProcessor();
+		MIMSID = MIMSImp.getID();
+		MIMSImp.show();
+
+		//*********For the first tile, open the original SEM image. After which, open the flipped and correctly oriented SEM image.
+		if ( TileCount <= 1){
+			IJ.showMessage("Please open the SEM Image");
+			od = new OpenDialog("Open image .....");
+			SEMdirectory = od.getDirectory();
+			SEMfilename = od.getFileName();
+			if (SEMfilename == null) return;
+			SEMfiletitle = SEMfilename.substring(0,SEMfilename.indexOf("."));
+			openfileseries = new Opener();
+			SEMImp = openfileseries.openImage(SEMdirectory,SEMfilename);
+			SEMIp = SEMImp.getProcessor();
+			SEMID = SEMImp.getID();
+			SEMImp.show();
+		}
+		else {
+			SEMImp = openfileseries.openImage(WriteFolder,SEMfiletitle + "_COMPOSITE_ALIGNED" + ".tif");
+			SEMIp = SEMImp.getProcessor();
+			SEMID = SEMImp.getID();
+			SEMImp.show();
+		}
+		
+	}
+
+	//*****This program asks the user to select two points each on the MIMS and SEM images. Then uses these two points to check if the images need to be
+   //*****Flipped with respect to each other. These two points selected are futher used by the other program to rotate the images with respect to each other.
+     protected void Flip_the_Images(){
+
+		ImagePlus SEMImp, MIMSImp;
+		ImageProcessor SEMIp, MIMSIp;
+		Roi SEMroi;
+		Polygon SEMp;
+		Roi MIMSroi;
+		Polygon MIMSp;
+		boolean MIMSFirstPtisInAboveHalf, MIMSFirstPtisOnRightHalf;
+		boolean SEMFirstPtisInAboveHalf, SEMFirstPtisOnRightHalf;
+		boolean MIMSSecondPtisAboveFirst, MIMSSecondPtisRightofFirst;
+		boolean SEMSecondPtisAboveFirst, SEMSecondPtisRightofFirst;
+		
+		//************************Select the points in the MIMS Image
+		if (WindowManager.getCurrentImage().getID() != MIMSID) WindowManager.putBehind();
+		MIMSImp = WindowManager.getImage(MIMSID);
+		WindowManager.setTempCurrentImage(MIMSImp);
+		new WaitForUserDialog("MesoFusion V1.6 Rescale and Resize for large scale Mosaic", "Please select a point in the MIMS image on a recognizable feature and then click OK. CHECK BEFORE CLICKING!!!").show();
+		MIMSImp = IJ.getImage();
+		MIMSIp = MIMSImp.getProcessor();
+		MIMSroi = MIMSImp.getRoi();
+		MIMSp = MIMSroi.getPolygon();
+		MIMSX1 = MIMSp.xpoints[0];
+		MIMSY1 = MIMSp.ypoints[0];
+		IJ.makeLine (MIMSX1,MIMSY1,MIMSIp.getWidth(),MIMSY1);
+		
+		new WaitForUserDialog("MesoFusion V1.6 Rescale and Resize for large scale Mosaic", "Please use the point ROI and select a point AS FAR AWAY AS POSSIBLE, and such that it makes an angle approx. between 20 to 70 deg to this line. Then click the OK button. CHECK BEFORE CLICKING!!!").show();
+		MIMSImp = IJ.getImage();
+		MIMSIp = MIMSImp.getProcessor();
+		MIMSroi = MIMSImp.getRoi();
+		MIMSp = MIMSroi.getPolygon();
+		MIMSX2 = MIMSp.xpoints[0];
+		MIMSY2 = MIMSp.ypoints[0];
+
+		if (MIMSY1 < (int)(MIMSIp.getHeight()/2))
+			MIMSFirstPtisInAboveHalf = true;
+		else
+			MIMSFirstPtisInAboveHalf = false;
+
+		if (MIMSX1 > (int)(MIMSIp.getWidth()/2))
+			MIMSFirstPtisOnRightHalf = true;
+		else
+			MIMSFirstPtisOnRightHalf = false;
+			
+			
+		if (MIMSY2 < MIMSY1) 
+			MIMSSecondPtisAboveFirst = true;
+		else
+			MIMSSecondPtisAboveFirst = false;
+
+		if (MIMSX2 > MIMSX1)
+			MIMSSecondPtisRightofFirst = true;
+		else
+			MIMSSecondPtisRightofFirst = false;
+
+		//************************Select the points in the SEM Image	
+		if (WindowManager.getCurrentImage().getID() != SEMID) WindowManager.putBehind();
+		SEMImp = WindowManager.getImage(SEMID);
+		WindowManager.setTempCurrentImage(SEMImp);
+		new WaitForUserDialog("MesoFusion V1.6 Rescale and Resize for large scale Mosaic", "Now select the same first point in the SEM image and then click the OK button. CHECK BEFORE CLICKING!!!").show();	
+		SEMImp = IJ.getImage();
+		SEMIp = SEMImp.getProcessor();
+		
+		SEMroi = SEMImp.getRoi();
+		SEMp = SEMroi.getPolygon();
+		SEMX1 = SEMp.xpoints[0];
+		SEMY1 = SEMp.ypoints[0];
+		IJ.makeLine (SEMX1,SEMY1, SEMIp.getWidth() , SEMY1);
+	
+		new WaitForUserDialog("MesoFusion V1.6 Rescale and Resize for large scale Mosaic", "Now select the same second point in the SEM image and then click the OK button. CHECK BEFORE CLICKING!!!").show();
+		SEMImp = IJ.getImage();
+		SEMIp = SEMImp.getProcessor();
+		SEMroi = SEMImp.getRoi();
+		SEMp = SEMroi.getPolygon();
+		SEMX2 = SEMp.xpoints[0];
+		SEMY2 = SEMp.ypoints[0];
+
+		if (SEMY1 < (int)(SEMIp.getHeight()/2))
+			SEMFirstPtisInAboveHalf = true;
+		else
+			SEMFirstPtisInAboveHalf = false;
+
+		if (SEMX1 > (int)(SEMIp.getWidth()/2))
+			SEMFirstPtisOnRightHalf = true;
+		else
+			SEMFirstPtisOnRightHalf = false;
+
+
+		if ( SEMY2 < SEMY1 )
+			SEMSecondPtisAboveFirst = true;
+		else
+			SEMSecondPtisAboveFirst = false;
+
+		if ( SEMX2 > SEMX1 ) 
+			SEMSecondPtisRightofFirst = true;
+		else
+			SEMSecondPtisRightofFirst = false;
+
+		//**************************Now Check if the images have to be flipped relative to one another
+		if (WindowManager.getCurrentImage().getID() != SEMID) WindowManager.putBehind();
+		SEMImp = WindowManager.getImage(SEMID);
+		WindowManager.setTempCurrentImage(SEMImp);	
+		SEMIp = SEMImp.getProcessor();
+
+		if ((MIMSSecondPtisRightofFirst == SEMSecondPtisRightofFirst || MIMSFirstPtisOnRightHalf == SEMFirstPtisOnRightHalf) && (MIMSSecondPtisAboveFirst != SEMSecondPtisAboveFirst || MIMSFirstPtisInAboveHalf != SEMFirstPtisInAboveHalf))
+			WasFlippedVertical = true;
+		else if ((MIMSSecondPtisAboveFirst == SEMSecondPtisAboveFirst || MIMSFirstPtisInAboveHalf == SEMFirstPtisInAboveHalf)  && (MIMSSecondPtisRightofFirst != SEMSecondPtisRightofFirst || MIMSFirstPtisOnRightHalf != SEMFirstPtisOnRightHalf))
+			WasFlippedHorizontal = true;
+	
+			//******To be flipped vertically
+		if (WasFlippedVertical == true){
+			IJ.run("Flip Vertically");
+			IJ.wait(300);
+			//*********************Now get the old selected points corrected for the flipped Image.
+			SEMY1 = SEMIp.getHeight() - SEMY1;
+			SEMY2 = SEMIp.getHeight() - SEMY2;
+		}
+
+		//******To be flipped horizontally
+		if (WasFlippedHorizontal == true){
+			IJ.run("Flip Horizontally");
+			IJ.wait(300);
+			//*********************Now get the old selected points corrected for the flipped Image.
+			SEMX1 = SEMIp.getWidth() - SEMX1;
+			SEMX2 = SEMIp.getWidth() - SEMX2;
+		}
+     	
+     }
+     
+	//*******This program adjust for any difference in rotation between the SEM and the MIMS image. It uses the two points selected in each image respectively
+	//*****to make this adjustment. This program also calculated the ratio of pixel size between the SEM and MIMS image. This ratio called
+	//********RelativeScaleSEM is used throughout the program.
+	
+	protected void Orient_the_Images(){
+
+		ImagePlus SEMImp;
+		ImageProcessor SEMIp;
+		
+		int RotateRequired;
+		Double SEMOPP, SEMADJ, SEMangle, SEMdistance;
+		Double MIMSOPP, MIMSADJ, MIMSangle, MIMSdistance;		
+
+		//********************Calculate the Orientation of the MIMS Image
+		MIMSOPP = Double.valueOf((MIMSY1) - Double.valueOf(MIMSY2));
+		MIMSADJ = Double.valueOf(MIMSX2) - Double.valueOf(MIMSX1);
+		MIMSangle = Math.atan2 ( MIMSOPP, MIMSADJ );
+		MIMSangle = Math.toDegrees(MIMSangle);
+
+		//********************Calculate the Orientation of the SEM Image
+		SEMOPP = Double.valueOf((SEMY1) - Double.valueOf(SEMY2));
+		SEMADJ = Double.valueOf(SEMX2) - Double.valueOf(SEMX1);
+		SEMangle = Math.atan2 ( SEMOPP, SEMADJ );
+		SEMangle = Math.toDegrees(SEMangle);
+
+		//******Now correct for rotation
+
+		RotateRequired = (int) Math.round(SEMangle - MIMSangle);	
+
+		if (WindowManager.getCurrentImage().getID() != SEMID) WindowManager.putBehind();
+		SEMImp = WindowManager.getImage(SEMID);
+		WindowManager.setTempCurrentImage(SEMImp);
+		String parameter = "angle=" + String.valueOf(RotateRequired) + " grid=1 interpolation=None";
+		IJ.run("Rotate... ", parameter);
+		IJ.wait(600);
+		
+		//*************** Now Map the SEM scale relative to the MIMS image 
+		SEMdistance = Math.sqrt(Math.pow(SEMX2 - SEMX1 , 2.0) + Math.pow(SEMY2 - SEMY1 , 2.0) );
+		MIMSdistance = Math.sqrt(Math.pow(MIMSX2 - MIMSX1 , 2.0) + Math.pow(MIMSY2 - MIMSY1 , 2.0) );
+		RelativeScaleSEM = SEMdistance / MIMSdistance;
+		
+	}
+
+	//*****Creates a folder to write images. 
+	protected boolean Create_the_write_folder(int i){
+		
+		//**************** Create the folder to save the corrected Images
+		WriteFolder = MIMSdirectory +  "Scaled" + String.valueOf(i);
+		File CreateFolder = new File(WriteFolder);
+		if (!CreateFolder.exists()){
+			CreateFolder.mkdir();
+			return true;
+		}
+		else {
+			return false;
+		}	
+	}
+
+	//*****Creates a folder to write the Individual Tile Images. 
+	
+	protected void Create_the_Tile_folder(int i){
+		
+		//**************** Create the folder to save the corrected Images
+		TileFolder = WriteFolder + "//" + "Tile" + String.valueOf(i);
+		File CreateFolder = new File(TileFolder);
+		if (!CreateFolder.exists()){
+			CreateFolder.mkdir();	
+		}	
+	}
+	
+	//********This subroutine asks the user to select the same feature in both SEM and MIMS image. It aligns the center of the feature
+	//*******of SEM image with respect to the center of feature of the MIMS image.
+	protected void Pick_the_SEM_TILE(){
+
+		ImagePlus SEMImp, MIMSImp;
+		ImageProcessor SEMIp, MIMSIp;
+		
+		Rectangle SEMROI, MIMSROI;
+		int TranslateX, TranslateY;
+		int SEMstartX, SEMstartY, SEMcenterX, SEMcenterY, SEMFullCenterX, SEMFullCenterY, SEMImageWidth, SEMImageHeight;
+		int MIMSstartX, MIMSstartY, MIMScenterX, MIMScenterY, MIMSFullCenterX, MIMSFullCenterY, MIMSImageWidth, MIMSImageHeight;
+		int CropX, CropY, CropW, CropH;
+		String Parameter; 
+		
+		
+		if (WindowManager.getCurrentImage().getID() != MIMSID) WindowManager.putBehind();
+		MIMSImp = WindowManager.getImage(MIMSID);
+		WindowManager.setTempCurrentImage(MIMSImp);
+		MIMSImp.show();
+		new WaitForUserDialog("MesoFusion V1.6 Rescale and Resize for large scale Mosaic", "Select a Rectangular ROI in the MIMS Image enclosing a large organelle like nucleus, and then click OK. CHECK BEFORE CLICKING!!!").show();
+		MIMSImp = IJ.getImage();
+		MIMSIp = MIMSImp.getProcessor();
+		MIMSImageWidth = MIMSIp.getWidth();
+		MIMSImageHeight = MIMSIp.getHeight();
+		MIMSFullCenterX = MIMSImageWidth/2;
+		MIMSFullCenterY = MIMSImageHeight/2;
+		MIMSROI = MIMSIp.getRoi();
+		IJ.wait(300);
+		
+		//****** ROI Co-ordinates
+		MIMSstartX = MIMSROI.x;
+		MIMSstartY = MIMSROI.y;
+		MIMScenterX = (MIMSROI.x + MIMSROI.width/2);
+		MIMScenterY = (MIMSROI.y + MIMSROI.height/2);
+		MIMSImp.killRoi();
+		
+		
+		if (WindowManager.getCurrentImage().getID() != SEMID) WindowManager.putBehind();
+		SEMImp = WindowManager.getImage(SEMID);
+		WindowManager.setTempCurrentImage(SEMImp);
+		SEMImp.show();
+		new WaitForUserDialog("MesoFusion V1.6 Rescale and Resize for large scale Mosaic", "Now select a Rectangular ROI in the same organelle in the SEM image. CHECK BEFORE CLICKING!!!").show();
+		SEMImp = IJ.getImage();
+		SEMIp = SEMImp.getProcessor();
+		SEMImageWidth = SEMIp.getWidth();
+		SEMImageHeight = SEMIp.getHeight();
+		SEMFullCenterX = SEMImageWidth/2;
+		SEMFullCenterY = SEMImageHeight/2;
+		SEMROI = SEMIp.getRoi();
+		IJ.wait(300);
+		
+		//****** ROI Co-ordinates
+		SEMstartX = SEMROI.x;
+		SEMstartY = SEMROI.y;
+		SEMcenterX = (SEMROI.x + SEMROI.width/2);
+		SEMcenterY = (SEMROI.y + SEMROI.height/2);
+		SEMImp.killRoi();
+	
+		CropX = SEMcenterX - (int)(RelativeScaleSEM *  MIMScenterX * FOVincreaseFactor);
+		CropY = SEMcenterY - (int)(RelativeScaleSEM * MIMScenterY * FOVincreaseFactor);
+		CropW = (int)(RelativeScaleSEM * MIMSImageWidth * FOVincreaseFactor);           
+		CropH = (int)(RelativeScaleSEM * MIMSImageHeight * FOVincreaseFactor);  
+
+		
+		//********The ROI should not exceed the Width of the image
+		if (( CropX + CropW ) >=  (SEMImageWidth - 1) ) {
+			//CropX = SEMImageWidth - 1 - CropW;
+			CropW = SEMImageWidth - 1 - CropX;
+			ROIexceededImage = true;
+		}
+
+
+		//********The ROI should not exceed the Height of the image	
+		if (( CropY + CropH ) >=  (SEMImageHeight - 1) ) {
+			//CropY = SEMImageHeight - 1 - CropH;
+			CropH = SEMImageHeight - 1 - CropY;
+			ROIexceededImage = true;
+		}
+			
+		SEMImp = WindowManager.getImage(SEMID);
+		SEMImp.setRoi(CropX,CropY,CropW,CropH);
+
+		IJ.saveAs("Selection", WriteFolder + "//" + MIMSfiletitle + "_SCALED" + ".roi");              //****Saving the ROI
+		IJ.wait (600);
+		IJ.run("Crop");
+		IJ.wait (600); 
+
+		//********Now crop the MIMS image so that it matches the SEM cropped tile, only when the width of the SEM ROI had to be reduced. 
+		if (ROIexceededImage == true){
+			if (WindowManager.getCurrentImage().getID() != MIMSID) WindowManager.putBehind();
+			MIMSImp = WindowManager.getImage(MIMSID);
+			WindowManager.setTempCurrentImage(MIMSImp);
+			MIMSImp.show();
+
+			MIMSCropWidth = (int)(MIMSImageWidth / (RelativeScaleSEM  * FOVincreaseFactor));   
+			MIMSCropHeight = (int)(MIMSImageHeight / (RelativeScaleSEM *  FOVincreaseFactor)); 
+			MIMSImp.setRoi(0,0,MIMSCropWidth,MIMSCropHeight);
+			IJ.wait (300);
+			IJ.run("Crop");
+		}
+
+		
+	}
+
+	//*************Rescales the MIMS image to the same pixel dimensions of the cropped SEM image.
+	protected void Rescale_MIMS_Image(){
+		
+		ImagePlus SEMImp, MIMSImp;
+		ImageProcessor SEMIp, MIMSIp;
+		
+		if (WindowManager.getCurrentImage().getID() != SEMID) WindowManager.putBehind();
+		SEMImp = WindowManager.getImage(SEMID);
+		WindowManager.setTempCurrentImage(SEMImp);
+		SEMImp.show();
+		SEMIp = SEMImp.getProcessor();
+		ReScaleSizeX = SEMIp.getWidth();
+		ReScaleSizeY = SEMIp.getHeight();
+
+		if (WindowManager.getCurrentImage().getID() != MIMSID) WindowManager.putBehind();
+		MIMSImp = WindowManager.getImage(MIMSID);
+		WindowManager.setTempCurrentImage(MIMSImp);
+		MIMSImp.show();
+		MIMSIp = MIMSImp.getProcessor();
+		MIMSIp = MIMSIp.resize(ReScaleSizeX, ReScaleSizeY);
+		MIMSImp.setProcessor ("", MIMSIp);
+		IJ.wait(300);
+		
+		
+	}
+		
+	//*******Finally, if NanoSIMS elemental map like sulphur is used as the MIMS image for alignment. All the alignments done on it
+	//********Should be transfered to the N15/N14 ratio map. Because this is the image that we will use for the final color overlay with
+	//******SEM image.
+	protected void Make_the_same_corrections_for_N15N14map(){
+
+		String N15N14directory, N15N14FileName, N15N14FileTitle;
+		ImagePlus N15N14Imp;
+		ImageProcessor N15N14Ip;
+		
+		IJ.showMessage("Please open the N15/N14 or C13/C12 ratio map");
+		OpenDialog od = new OpenDialog("Open image .....");
+		N15N14directory = od.getDirectory();
+		N15N14FileName = od.getFileName();
+		if (N15N14FileName == null) return;
+		N15N14FileTitle = N15N14FileName.substring(0,N15N14FileName.indexOf("."));
+		Opener openfileseries = new Opener();
+		N15N14Imp = openfileseries.openImage(N15N14directory,N15N14FileName);
+		N15N14Ip = N15N14Imp.getProcessor();
+		N15N14Imp.show();
+
+		if (ROIexceededImage == true){
+			N15N14Imp.setRoi(0,0,MIMSCropWidth,MIMSCropHeight);
+			IJ.wait (300);
+			IJ.run("Crop");
+		}
+		
+		N15N14Ip = N15N14Ip.resize(ReScaleSizeX, ReScaleSizeY);
+		N15N14Imp.setProcessor ("", N15N14Ip);
+		IJ.wait(300);
+		
+		//**********Now Save the Image
+		IJ.save (TileFolder + "//" + N15N14FileTitle + "_SCALED" + ".tif");
+		N15N14Imp.close();	
+	}
+	
+	
+	//*******Save the aligned MIMS and SEM images.
+	protected void Save_the_Tile_Images(){
+
+		ImagePlus SEMImp, MIMSImp;
+		ImageProcessor SEMIp;
+		
+		//*******************First Save the MIMS Images
+		MIMSImp = WindowManager.getImage(MIMSID);
+		WindowManager.setTempCurrentImage(MIMSImp);
+		IJ.run("Enhance Contrast", "saturated=0.35");
+		IJ.wait(500);
+		IJ.save (TileFolder + "//" + MIMSfiletitle + "_SCALED" + ".tif");
+		MIMSImp.close();	
+
+		//*******************Then Save the SEM Images
+		SEMImp = WindowManager.getImage(SEMID);
+		WindowManager.setTempCurrentImage(SEMImp);
+		
+		//********Commenting this out because it can make the SEM too bright.
+		//IJ.run("Enhance Contrast", "saturated=0.35");
+		IJ.wait(500);
+		//Convert to 8 bits
+		ImageConverter iConv1 = new ImageConverter(SEMImp);
+		iConv1.setDoScaling(true);
+		iConv1.convertToGray8();
+		SEMIp = SEMImp.getProcessor();
+		IJ.save (TileFolder + "//" + SEMfiletitle + "Tile" + TileCount + "_SCALED" + ".tif");
+		SEMImp.close();	
+	}
+
+
+	//*******Save the Flipped and Rotated SEM Composite Image.
+	protected void Save_the_Composite_SEM_Image(){
+
+		ImagePlus SEMImp;
+		ImageProcessor SEMIp;
+		
+		//*******************Then Save the Composite SEM Image
+		SEMImp = WindowManager.getImage(SEMID);
+		WindowManager.setTempCurrentImage(SEMImp);
+		IJ.wait(500);
+
+		//*******Finally convert to an RGB image.
+		ImageConverter iConv3 = new ImageConverter(SEMImp);
+		iConv3.setDoScaling(true);
+		iConv3.convertToRGB();
+		SEMIp = SEMImp.getProcessor();
+		
+		IJ.save (WriteFolder + "//" + SEMfiletitle + "_COMPOSITE_ALIGNED" + ".tif");
+	}
+	
+}

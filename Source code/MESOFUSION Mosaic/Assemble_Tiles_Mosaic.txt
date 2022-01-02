@@ -1,0 +1,155 @@
+//*************This Plugin MesoFusion was developed by Ranjan Ramachandra at NCMIR, UC San Diego, Feb 2020. MesoFusion Stands for Mesoscale Fusion.
+//********Although, initially intended to align SEM image with correspoding MIMS image; It can be used to align Images between various Microscopy techniques like Optical, electron microscope and Secondary Ion Mass spectroscopy.
+
+//**********This Plugin does a rough alignment of the SEM image to the MIMS image for any rotation and translation.It also matches the Field of View (FOV) of the SEM image
+//**********to the FOV of the MIMS image. Generally, the SEM images have a much larger FOV than the MIMS image, and the SEM image 
+//*******is cropped to match the MIMS image. The Program can handle the vice versa too, i.e. MIMS image having a larger FOV.
+//************************Version 1.2
+
+//********************Version Log	
+//**********Version 1.0 : Full functionality.
+//*********Version 1.1  : Named the Plugin MesoFusion. Made changes so that the program does not save in the same folder, but creates a new folder everytime. Made the categorize ratio maps use pixel intensity 
+//**********              instead of natural ratio. The Final color overlay reads the threshold values directly from the filename and need not be manually entered.
+//**********Version 1.2 : Fixed the problem wih flipping the image. Also for rectanular image for some particular cases the Rescale and Resize was not working appropriately, fixed it.
+//**********Version 1.3 : Fixed another problem related to flipping.
+//***********Version 1.4 : Made more colors available to the User, to facilitate people with color vision deficiency.
+//**********Version 1.5 : Added the functionality for Mosaic
+//*************Version 6 :- Debugged some of the bugs in the program
+
+
+import ij.*;
+import ij.process.*;
+import ij.gui.*;
+import java.awt.*;
+import ij.plugin.*;
+import ij.plugin.frame.*;
+import ij.io.*;
+import java.io.*;
+import java.util.*;
+import ij.macro.*;
+import ij.plugin.PlugIn; 
+import ij.plugin.frame.ThresholdAdjuster;
+import ij.plugin.filter.PlugInFilter;
+import ij.gui.OvalRoi;
+import java.lang.Math;
+import java.util.Random;
+import java.awt.Polygon;
+import java.text.DecimalFormat;				
+import ij.WindowManager;
+import ij.IJ;
+import ij.plugin.frame.RoiManager;
+import ij.process.EllipseFitter;					
+import ij.measure.*;
+import ij.plugin.filter.*;
+import java.awt.event.*;
+
+
+public class Assemble_Tiles_Mosaic implements PlugIn {
+
+	int NumberofTiles;
+	int SEMID,MIMSID;
+	int TileCount;
+	String SEMdirectory, SEMfilename,MIMSdirectory, MIMSfilename, ROIdirectory, ROIfilename, SEMfiletitle;
+	Rectangle TileROI;
+	ImagePlus SEMImp, MIMSImp;
+	ImageProcessor SEMIp, MIMSIp;
+	
+	public void run(String arg) {
+
+		GenericDialog Gd;
+		Gd = new GenericDialog ("MesoFusion V1.6 Assemble Colored Tiles for large scale Mosaic");
+		Gd.addMessage ("This Plugin MesoFusion was developed by Ranjan Ramachandra at NCMIR, UC San Diego.");	
+		Gd.addNumericField("Total Number of Tiles", 10, 0);
+		Gd.showDialog();
+
+		if (Gd.wasCanceled() == true){
+			IJ.showMessage("MesoFusion V1.6 Assemble Colored Tiles for large scale Mosaic","MesoFusion was canceled.");
+			return;
+		}
+		else {
+			NumberofTiles = (int)(Gd.getNextNumber());
+		}
+		Open_the_SEM_Images();
+		
+		for (TileCount = 1;  TileCount <= NumberofTiles; TileCount++){
+			Open_the_MIMS_Tile_and_ROI();
+		}
+		Save_the_Composite_SEM_Image();
+		IJ.showMessage("The Colored Mosaic will be saved in : " +SEMdirectory);
+	}
+
+
+	//*****This subroutine opens the SEM image and records the unique Image ID.
+	protected void Open_the_SEM_Images(){
+
+		//*********opens the original SEM image, that has been flipped and correctly for orientation.
+			new WaitForUserDialog("MesoFusion V1.6 Assemble Tiles Mosaic", "Please close the brightness/contrast adjustment window, if they are open. Since it will cause the program to fail and then click OK. CHECK BEFORE CLICKING!!!").show();
+			IJ.showMessage("Please open the Composite SEM Image that has been adjusted for Flip and Orientation");
+			OpenDialog od = new OpenDialog("Open image .....");
+			SEMdirectory = od.getDirectory();
+			SEMfilename = od.getFileName();
+			SEMfiletitle = SEMfilename.substring(0,SEMfilename.indexOf("."));
+			if (SEMfilename == null) return;
+			Opener openfileseries = new Opener();
+			SEMImp = openfileseries.openImage(SEMdirectory,SEMfilename);
+			SEMIp = SEMImp.getProcessor();
+			SEMID = SEMImp.getID();
+			SEMImp.show();	 
+	}
+
+	//*****This subroutine opens the MIMS image and records the unique Image ID. Also Opens the Respctive ROI on the SEM image
+	protected void Open_the_MIMS_Tile_and_ROI(){
+
+	
+		IJ.showMessage("Please open the Colored Warp adjusted MIMS Image Tile Number : " +TileCount);
+		OpenDialog od = new OpenDialog("Open image .....");
+		MIMSdirectory = od.getDirectory();
+		MIMSfilename = od.getFileName();
+		if (MIMSfilename == null) return;
+		Opener openfileseries = new Opener();
+		MIMSImp = openfileseries.openImage(MIMSdirectory,MIMSfilename);
+		MIMSIp = MIMSImp.getProcessor();
+		MIMSID = MIMSImp.getID();
+		MIMSImp.show();
+		IJ.wait(200);
+		IJ.wait(200);
+		IJ.run("Select All");
+		IJ.run("Copy");
+		IJ.wait(600);
+		MIMSImp.killRoi();
+		
+		//************************Select the Respcetive ROI on the SEM Image
+		if (WindowManager.getCurrentImage().getID() != SEMID) WindowManager.putBehind();
+		SEMImp = WindowManager.getImage(SEMID);
+		WindowManager.setTempCurrentImage(SEMImp);
+		SEMIp = SEMImp.getProcessor();
+		IJ.showMessage("Please open the ROI Number : " +TileCount);
+		Opener openROI = new Opener();
+		openROI.open();
+		IJ.run("Paste");
+		IJ.wait(600);
+		SEMImp.killRoi();
+		//SEMImp.setProcessor(SEMIp);
+		
+		//***********************Now close the MIMS Tile Image
+		
+		//if (WindowManager.getCurrentImage().getID() != MIMSID) WindowManager.putBehind();
+		MIMSImp = WindowManager.getImage(MIMSID);
+		WindowManager.setTempCurrentImage(MIMSImp);
+		MIMSImp.close();
+	}
+
+	//*******Save the Flipped and Rotated SEM Composite Image.
+	protected void Save_the_Composite_SEM_Image(){
+
+		ImagePlus SEMImp;
+		ImageProcessor SEMIp;
+		
+		//*******************Then Save the Composite SEM Image
+		SEMImp = WindowManager.getImage(SEMID);
+		WindowManager.setTempCurrentImage(SEMImp);
+		IJ.wait(500);
+		
+		IJ.save (SEMdirectory + SEMfiletitle + "_Colored_OVERLAY" + ".tif");
+	}
+}

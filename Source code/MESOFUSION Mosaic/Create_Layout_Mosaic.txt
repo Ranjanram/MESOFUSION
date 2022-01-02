@@ -1,0 +1,231 @@
+//*************This Plugin MesoFusion was developed by Ranjan Ramachandra at NCMIR, UC San Diego, Feb 2020. MesoFusion Stands for Mesoscale Fusion.
+//********Although, initially intended to align SEM image with correspoding MIMS image; It can be used to align Images between various Microscopy techniques like Optical, electron microscope and Secondary Ion Mass spectroscopy.
+
+//******This uses the Roughly aligned images from the Rescale_Resize plugin to create a barebones landmark image. When both the SEM and 
+//****MIMS images are converted to the Barebones image, they look similar. This is then fed to the UnwapJ plugin to make any adjustment for warping.
+//*****For more details about the UnwarpJ plugin please refer to :
+//***C.Ó. Sánchez Sorzano, P. Thévenaz, M. Unser, "Elastic Registration of Biological Images Using Vector-Spline Regularization ," IEEE Transactions on Biomedical Engineering, vol. 52, no. 4, pp. 652-663, April 2005.
+//***************************************Version 1.2
+
+//********************Version Log	
+//**********Version 1.0 : Full functionality.
+//*********Version 1.1  : Named the Plugin MesoFusion. Made changes so that the program does not save in the same folder, but creates a new folder everytime. Made the categorize ratio maps use pixel intensity 
+//**********              instead of natural ratio. The Final color overlay reads the threshold values directly from the filename and need not be manually entered.
+//**********Version 1.2 : Fixed the problem wih flipping the image. Also for rectanular image for some particular cases the Rescale and Resize was not working appropriately, fixed it.
+//**********Version 1.3 : Fixed problem with Flipping the image.
+//***********Version 1.4 : Made more colors available to the User, to facilitate people with color vision deficiency.
+//***********Version 1.5 : Added the feature of Mosaic.
+//***********Version 1.6 : Corrected for some bugs in the program.
+
+import ij.*;
+import ij.process.*;
+import ij.gui.*;
+import java.awt.*;
+import ij.plugin.*;
+import ij.plugin.frame.*;
+import ij.io.*;
+import java.io.*;
+import java.util.*;
+import ij.macro.*;
+import ij.plugin.PlugIn; 
+import ij.plugin.frame.ThresholdAdjuster;
+import ij.plugin.filter.PlugInFilter;
+import ij.gui.OvalRoi;
+import java.lang.Math;
+import java.util.Random;
+import java.awt.Polygon;
+import java.text.DecimalFormat;				
+import ij.WindowManager;
+import ij.IJ;
+import ij.plugin.frame.RoiManager;
+import ij.process.EllipseFitter;					
+import ij.measure.*;
+import ij.plugin.filter.*;
+import java.awt.event.*;
+
+public class Create_Layout_Mosaic implements PlugIn {
+
+	String Directory, FileName, FileTitle, WriteFolder;
+	int NumberofParts;
+	String [] ImageKind = {"Select", "MIMS", "SEM"};
+	String ImageTypeSelected;
+	
+	public void run(String arg) {
+
+		GenericDialog Gd;
+		boolean WasAbletoCreateFolder = false;
+		int counter = 1;
+		
+		Gd = new GenericDialog ("MesoFusion V1.6 Create Layout for large scale Mosaic");
+		Gd.addMessage ("This Plugin MesoFusion was developed by Ranjan Ramachandra at NCMIR, UC San Diego.");
+		Gd.addNumericField("Total Number of Landmarks", 6, 0);
+		Gd.addChoice("Please select the Image Type", ImageKind, ImageKind[0]); 
+		Gd.addMessage ("The output of this program is used fed into any program that corrects for warping distortions.");
+		Gd.addMessage ("We recommend using UnwarpJ pluign in ImageJ. For details on UnwarpJ, Please refer :-");
+		Gd.addMessage ("C.Ó. Sánchez Sorzano, P. Thévenaz, M. Unser, Elastic Registration of Biological Images Using Vector-Spline Regularization, IEEE Transactions on Biomedical Engineering, vol. 52, no. 4, pp. 652-663, April 2005.");
+
+		Gd.showDialog();
+		
+		if (Gd.wasCanceled() == true){
+			IJ.showMessage("MesoFusion V1.6 Create Layout for large scale Mosaic","MesoFusion was canceled.");
+			return;
+		}
+		else {
+			NumberofParts = (int)(Gd.getNextNumber());	
+			ImageTypeSelected = Gd.getNextChoice();
+		}
+		
+		IJ.showMessage("Please open the Scaled and Re-sized image");
+		Get_the_directory_filename ();
+
+		do {
+			WasAbletoCreateFolder = Create_the_write_folder(counter);
+			counter++;
+		} while ( WasAbletoCreateFolder == false);
+		
+		for (int i = 1;  i <= NumberofParts; i++){
+			Open_the_Image_File ();
+			//IJ.showMessage("Starting the Landmark : " +i);
+			Get_the_Image_Skeletonized(i);
+			Save_the_Skeletonized_SubParts(i);
+		}
+		Create_the_Final_image();	
+		IJ.showMessage("The Skeletonized Images will be saved in : " +WriteFolder);	
+	}
+
+	protected void Get_the_directory_filename(){
+
+		OpenDialog od = new OpenDialog("Open image .....");
+		Directory = od.getDirectory();
+		FileName = od.getFileName();
+		if (FileName == null) return;
+		FileTitle = FileName.substring(0,FileName.indexOf("."));
+			
+		}
+
+	protected void Open_the_Image_File (){
+		
+		Opener openfileseries = new Opener();
+		ImagePlus ImageImp = openfileseries.openImage(Directory,FileName);
+		ImageImp.show();
+					
+	}
+
+	protected void Save_the_Skeletonized_SubParts(int PartNumber){
+		
+		ImagePlus Imageimp = IJ.getImage();
+		IJ.save (WriteFolder + "//" + FileTitle + "_B_" + PartNumber + ".tif");
+		Imageimp.close();	
+		
+	}
+
+	protected void Create_the_Final_image(){
+
+		String SubFileName;
+		ImagePlus ImageImp, FinalSumImage;
+		
+		for (int i = 1;  i <= NumberofParts; i++){
+			SubFileName = FileTitle + "_B_" + i + ".tif";
+			Opener openfileseries = new Opener();
+			ImageImp = openfileseries.openImage(WriteFolder,SubFileName);
+			ImageImp.show();
+		}
+		IJ.run("Images to Stack", "name=Stack title=[] use");
+		IJ.run("Z Project...", "projection=[Sum Slices]");
+		FinalSumImage = IJ.getImage();
+		IJ.save (WriteFolder + "//" + FileTitle + "_BAREBONES" + ".tif");
+		FinalSumImage.close();
+		ImageImp = IJ.getImage();
+		ImageImp.close();	
+	}
+	
+	protected boolean Create_the_write_folder(int i){
+		
+		//**************** Create the folder to save the corrected Images
+		if (ImageTypeSelected == "Select" ||  ImageTypeSelected == "MIMS"){
+			WriteFolder = Directory + "MIMS_Barebones" + String.valueOf(i);
+		}
+		else {
+			WriteFolder = Directory + "SEM_Barebones" + String.valueOf(i);
+		}
+		File CreateFolder = new File(WriteFolder);
+		if (!CreateFolder.exists()){
+			CreateFolder.mkdir();
+			return true;
+		}
+		else {
+			return false;
+		}	
+	}
+	//********This is the main program. It asks the user to trace regions of interest using Free hand ROI's, and then converts
+	//*****them to black or white images. In the initial version of the program, it was seen that after tracing the region, before
+	//*****clicking the OK button, if the Brightness and Contrast window of ImageJ was open then it produced a weird error.
+	//*****Therefore, the message requests the user to close these windows before clicking OK.
+	
+	protected void Get_the_Image_Skeletonized(int PartNumber){
+		
+		int ImageMean;
+		
+		ImagePlus Imageimp = IJ.getImage();
+		ImageProcessor ImageIp = Imageimp.getProcessor();
+
+		//*****************Convert 32 and 16 bit images to 8 bits 
+		
+		if (ImageIp instanceof ShortProcessor) {			//This is a 16-bit image
+
+			//There is some bug with converter. Directly converting to 8 bit creates some issues.
+			//First, up-converting to 32 bit and then down-converting to 8 bit works better.
+			
+			ImageConverter iConv1 = new ImageConverter(Imageimp);
+			//iConv1.setDoScaling(true);
+			iConv1.convertToGray32();
+			ImageIp = Imageimp.getProcessor();
+			Imageimp.setProcessor(ImageIp);
+				
+			ImageConverter iConv2 = new ImageConverter(Imageimp);
+			iConv2.setDoScaling(true);
+			iConv2.convertToGray8();
+			ImageIp = Imageimp.getProcessor();
+			Imageimp.setProcessor(ImageIp);
+		
+		}
+		else if (ImageIp instanceof FloatProcessor) {		//This is a 32-bit image
+			
+			ImageConverter iConv2 = new ImageConverter(Imageimp);
+			//iConv2.setDoScaling(true);
+			iConv2.convertToGray8();
+			ImageIp = Imageimp.getProcessor();
+			Imageimp.setProcessor(ImageIp);
+
+		}
+
+		IJ.wait (300);
+		new WaitForUserDialog("MesoFusion V1.6 Create Layout", "Please use the Freehand tool to select Landmark " + String.valueOf(PartNumber) + ".After selecting is done, click the OK button. Ensure that the Brightness control or Thresholding windows are CLOSED before clicking OK. CHECK BEFORE CLICKING!!!").show();
+		Rectangle TraceRegion = ImageIp.getRoi();
+		IJ.run("Clear Outside");
+		IJ.wait (300); 
+		
+		Imageimp.killRoi();
+		IJ.run(Imageimp, "Invert", "");
+		ImageStatistics stats = ImageStatistics.getStatistics(ImageIp, ImageStatistics.MEAN, null);
+		ImageMean = (int)(stats.mean);
+		//IJ.showMessage("Get_the_SEMimage_Skeletonized :" +ImageMean);
+		if (ImageMean == 0) ImageMean = 1;
+		IJ.setThreshold(Imageimp, ImageMean, 255,"Black & White");
+		IJ.wait (300); 
+		
+		YesNoCancelDialog Th = new YesNoCancelDialog (IJ.getInstance(), "Threshold Setting", "Is the Threshold setting fine?");
+		
+		if (Th.yesPressed()) {
+			IJ.run("Convert to Mask");
+			IJ.run("Invert LUT");
+		}
+		else {                       //************If no or cancel is pressed
+			new WaitForUserDialog("MesoFusion V1.6 Create Layout", "Please manualy adjust the threshold, such that the selected landmark is black and rest of the image is white and then Apply. Then close the threshold window and then click the OK button. CHECK BEFORE CLICKING!!!").show();
+			IJ.run("Convert to Mask");
+			IJ.run("Invert LUT");
+		}
+		
+		return;
+	} //*********End of Get_the_Image_Skeletonized
+}
